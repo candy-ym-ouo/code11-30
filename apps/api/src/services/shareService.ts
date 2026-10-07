@@ -139,11 +139,17 @@ export async function viewShareLink(token: string, password?: string): Promise<P
   };
 }
 
-/** 访客读媒体：必须证明该媒体属于本链接覆盖的条目。 */
+/** 访客读媒体：必须证明该媒体属于本链接覆盖、且仍有效的条目（未删除、未入回收站）。 */
 export async function assertPublicMedia(token: string, mediaId: string) {
   const link = await loadLink(token);
+  // 条目条件与 viewShareLink 保持一致：移入回收站（或恢复前被彻底删除）的条目，
+  // 其媒体对访客立即不可读；链接内其他有效条目不受影响，恢复后自动重新可读。
   const media = await prisma.itemMedia.findFirst({
-    where: { id: mediaId, deletedAt: null, item: { shareLinks: { some: { shareLinkId: link.id } } } },
+    where: {
+      id: mediaId,
+      deletedAt: null,
+      item: { shareLinks: { some: { shareLinkId: link.id } }, deletedAt: null, status: { not: 'trashed' } },
+    },
   });
   if (!media) throw notFound('媒体不存在');
   return media;

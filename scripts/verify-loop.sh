@@ -129,10 +129,12 @@ if [ "$DISPLAY" = "1978 年" ]; then ok "模糊时间按精度展示为「1978 �
 if [ "$(json 'd.item.timeUncertain' < "$WORK/body")" = "true" ]; then ok "标注为「时间存疑」"; else bad "未标注时间存疑"; fi
 
 # 其余三类物品
+IID2=""
 for spec in "souvenir|结婚时的搪瓷缸" "receipt|1983 年的自行车发票" "manuscript|奶奶的手写菜谱"; do
   cat="${spec%%|*}"; title="${spec##*|}"
   code=$(req POST "$V1/families/$FID/items" "$JAR_A" "{\"title\":\"$title\",\"category\":\"$cat\",\"acquiredPrecision\":\"unknown\",\"acquiredLabel\":\"记不清了\",\"placeText\":\"老家\"}" "$TOKEN_A")
   expect "$code" 201 "创建条目（$cat）"
+  [ "$cat" = "souvenir" ] && IID2=$(json 'd.item.id' < "$WORK/body")
 done
 
 # ---------- 5. 媒体上传 ----------
@@ -250,9 +252,10 @@ code=$(req GET "$V1/families/$FID/stats" "$JAR_A" "" "$TOKEN_A"); expect "$code"
 
 # ---------- 9. 分享链接 ----------
 step "9/10 对外分享链接"
-code=$(req POST "$V1/families/$FID/share-links" "$JAR_A" "{\"itemIds\":[\"$IID\"],\"expiresInDays\":7,\"password\":\"zhangjia\",\"label\":\"给二叔看看\"}" "$TOKEN_A")
-expect "$code" 201 "创建带密码的分享链接"
+code=$(req POST "$V1/families/$FID/share-links" "$JAR_A" "{\"itemIds\":[\"$IID\",\"$IID2\"],\"expiresInDays\":7,\"password\":\"zhangjia\",\"label\":\"给二叔看看\"}" "$TOKEN_A")
+expect "$code" 201 "创建带密码的分享链接（覆盖 2 条条目）"
 SHARE_TOKEN=$(json 'd.shareLink.token' < "$WORK/body")
+LINK_ID=$(json 'd.shareLink.id' < "$WORK/body")
 
 code=$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{}' "$V1/public/share/$SHARE_TOKEN")
 expect "$code" 200 "匿名访问返回「需要密码」"
@@ -262,10 +265,13 @@ if [ "$NEEDS_PW" = "true" ]; then ok "未提供密码时不泄露内容"; else b
 code=$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"zhangjia"}' "$V1/public/share/$SHARE_TOKEN")
 expect "$code" 200 "密码正确后可见"
 SHARED_ITEMS=$(json 'd.share.items.length' < "$WORK/body")
-if [ "$SHARED_ITEMS" = "1" ]; then ok "访客只看到被分享的 1 条"; else bad "访客看到 $SHARED_ITEMS 条（应为 1）"; fi
+if [ "$SHARED_ITEMS" = "2" ]; then ok "访客只看到被分享的 2 条"; else bad "访客看到 $SHARED_ITEMS 条（应为 2）"; fi
 
 code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"bad"}' "$V1/public/share/$SHARE_TOKEN")
 expect "$code" 401 "密码错误被拒绝"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 200 "条目有效时，分享链接可读取其照片（基线）"
 
 # ---------- 10. 导出 / 审计 / 回收站 ----------
 step "10/10 导出、审计与回收站"
@@ -302,7 +308,24 @@ code=$(req POST "$V1/families/$FID/items/$IID/trash" "$JAR_A" "" "$TOKEN_A"); ex
 code=$(req GET "$V1/families/$FID/items/trash" "$JAR_A" "" "$TOKEN_A")
 TRASH_N=$(json 'd.items.length' < "$WORK/body")
 if [ "$TRASH_N" -ge 1 ]; then ok "回收站中可查（$TRASH_N 条）"; else bad "回收站查询异常"; fi
+
+# 删除联动媒体读取：回收站中的条目，旧分享链接不能再取走它的照片
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 404 "移入回收站后，分享链接不再提供该条目的照片"
+code=$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"zhangjia"}' "$V1/public/share/$SHARE_TOKEN")
+SHARED_AFTER_TRASH=$(json 'd.share.items.length' < "$WORK/body")
+if [ "$SHARED_AFTER_TRASH" = "1" ]; then ok "回收站条目从分享视图消失，链接内其他条目不受影响"; else bad "回收站后分享视图剩 $SHARED_AFTER_TRASH 条（应为 1）"; fi
+
 code=$(req POST "$V1/families/$FID/items/$IID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "从回收站恢复"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 200 "恢复后，分享链接重新可读该条目照片"
+
+# 撤销联动媒体读取：链接一旦撤销，媒体随之不可读
+code=$(req DELETE "$V1/families/$FID/share-links/$LINK_ID" "$JAR_A" "" "$TOKEN_A"); expect "$code" 204 "撤销分享链接"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 404 "撤销后，分享链接的媒体一并失效"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"zhangjia"}' "$V1/public/share/$SHARE_TOKEN")
+expect "$code" 404 "撤销后，分享视图一并失效"
 
 # ---------- 汇总 ----------
 printf '\n\033[1m结果：%d 项通过，%d 项失败\033[0m\n' "$PASS" "$FAIL"
