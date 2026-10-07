@@ -243,8 +243,9 @@ PERSON_HITS=$(json 'd.items.length' < "$WORK/body")
 if [ "$PERSON_HITS" = "1" ]; then ok "按来源人物反查命中 1 条"; else bad "来源人物反查异常：$PERSON_HITS"; fi
 
 code=$(req GET "$V1/families/$FID/timeline" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "时间轴分组"
-GROUPS=$(json 'd.groups.length' < "$WORK/body")
-if [ "$GROUPS" -ge 1 ]; then ok "时间轴返回 $GROUPS 个时段分组"; else bad "时间轴无分组"; fi
+# 注意：GROUPS 是 bash 内置数组（用户组列表），赋值无效且返回非零，不能用作变量名
+TL_GROUPS=$(json 'd.groups.length' < "$WORK/body")
+if [ "$TL_GROUPS" -ge 1 ]; then ok "时间轴返回 $TL_GROUPS 个时段分组"; else bad "时间轴无分组"; fi
 
 code=$(req GET "$V1/families/$FID/stats" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "家庭统计"
 
@@ -253,6 +254,7 @@ step "9/10 对外分享链接"
 code=$(req POST "$V1/families/$FID/share-links" "$JAR_A" "{\"itemIds\":[\"$IID\"],\"expiresInDays\":7,\"password\":\"zhangjia\",\"label\":\"给二叔看看\"}" "$TOKEN_A")
 expect "$code" 201 "创建带密码的分享链接"
 SHARE_TOKEN=$(json 'd.shareLink.token' < "$WORK/body")
+SHARE_LINK_ID=$(json 'd.shareLink.id' < "$WORK/body")
 
 code=$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{}' "$V1/public/share/$SHARE_TOKEN")
 expect "$code" 200 "匿名访问返回「需要密码」"
@@ -302,7 +304,24 @@ code=$(req POST "$V1/families/$FID/items/$IID/trash" "$JAR_A" "" "$TOKEN_A"); ex
 code=$(req GET "$V1/families/$FID/items/trash" "$JAR_A" "" "$TOKEN_A")
 TRASH_N=$(json 'd.items.length' < "$WORK/body")
 if [ "$TRASH_N" -ge 1 ]; then ok "回收站中可查（$TRASH_N 条）"; else bad "回收站查询异常"; fi
+
+# 回收站联动：旧分享链接不能再取走该条目的媒体，分享视图也不再列出它
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 404 "条目在回收站时，旧分享链接取不到照片"
+code=$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"zhangjia"}' "$V1/public/share/$SHARE_TOKEN")
+TRASHED_SHARED=$(json 'd.share.items.length' < "$WORK/body")
+if [ "$TRASHED_SHARED" = "0" ]; then ok "回收站条目从分享视图中消失"; else bad "回收站条目仍出现在分享视图（$TRASHED_SHARED 条）"; fi
+
 code=$(req POST "$V1/families/$FID/items/$IID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "从回收站恢复"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 200 "条目恢复后，仍有效的分享链接可正常取回照片"
+
+# 撤销联动：链接一旦撤销，媒体读取与分享视图一并失效
+code=$(req DELETE "$V1/families/$FID/share-links/$SHARE_LINK_ID" "$JAR_A" "" "$TOKEN_A"); expect "$code" 204 "撤销分享链接"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$V1/public/share/$SHARE_TOKEN/media/$MID_IMG/raw")
+expect "$code" 404 "链接撤销后，媒体直链一并失效"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"password":"zhangjia"}' "$V1/public/share/$SHARE_TOKEN")
+expect "$code" 404 "链接撤销后，分享视图一并失效"
 
 # ---------- 汇总 ----------
 printf '\n\033[1m结果：%d 项通过，%d 项失败\033[0m\n' "$PASS" "$FAIL"
